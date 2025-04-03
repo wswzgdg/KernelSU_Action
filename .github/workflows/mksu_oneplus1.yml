@@ -105,12 +105,12 @@ jobs:
             echo "BRANCH=-s susfs-dev" >> $GITHUB_ENV
           fi
           
-      - name: Add KernelSU-MKSU-SKN
+      - name: Add KernelSU-MKSU-SKN-ultra
         run: |
           cd kernel_workspace/kernel_platform
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/KernelSU/main/kernel/setup.sh" | bash ${{ env.BRANCH }}
+          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
           cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" 12505)
+          KSU_VERSION=114514
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           #sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
           
@@ -184,8 +184,6 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> kernel_workspace/kernel_platform/common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> kernel_workspace/kernel_platform/common/arch/arm64/configs/gki_defconfig
 
-          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
           # Remove check_defconfig
           sed -i 's/check_defconfig//' kernel_workspace/kernel_platform/common/build.config.gki
 
