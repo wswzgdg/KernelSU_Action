@@ -1,4 +1,4 @@
-name: Build OKI with MKSU(KPM)
+name: Build OKI with MKSU
 on:
   workflow_dispatch:
     inputs:
