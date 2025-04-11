@@ -61,6 +61,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      KERNEL_PATH: kernel_workspace/kernel_platform
 
     steps:
       - name: Maximize build space
@@ -95,24 +97,23 @@ jobs:
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
           repo sync -j$(nproc --all)
           
-          # 修复路径问题，先检查文件是否存在再操作
-          if [ -d "kernel_platform/common/android" ]; then
-            rm -f kernel_platform/common/android/abi_gki_protected_exports_* 2>/dev/null || true
-          fi
-          if [ -d "kernel_platform/msm-kernel/android" ]; then
-            rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* 2>/dev/null || true
-          fi
-          if [ -f "kernel_platform/common/scripts/setlocalversion" ]; then
-            sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
-          fi
-          if [ -f "kernel_platform/msm-kernel/scripts/setlocalversion" ]; then
-            sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
-          fi
+          # 修复路径删除操作
+          (ls kernel_platform/common/android/abi_gki_protected_exports_* 2>/dev/null | xargs rm -f) || true
+          (ls kernel_platform/msm-kernel/android/abi_gki_protected_exports_* 2>/dev/null | xargs rm -f) || true
+          
+          # 安全修改 setlocalversion
+          for ver_file in kernel_platform/common/scripts/setlocalversion kernel_platform/msm-kernel/scripts/setlocalversion; do
+            if [ -f "$ver_file" ]; then
+              sed -i 's/ -dirty//g' "$ver_file"
+            else
+              echo "::warning::未找到 $ver_file，跳过修改"
+            fi
+          done
 
       - name: Setup KernelSU
         if: ${{ github.event.inputs.kernelsu_variant != 'without ksu' }}
         run: |
-          cd kernel_workspace/kernel_platform
+          cd $KERNEL_PATH
           if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" ]]; then
             curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.kernelsu_version == 'main' && '-s susfs-dev' || '' }}
             cd KernelSU
@@ -128,7 +129,7 @@ jobs:
       - name: Apply patches
         if: ${{ github.event.inputs.SUSFS_ENABLED || github.event.inputs.VFS_patch_ENABLED == 'enable' }}
         run: |
-          cd kernel_workspace/kernel_platform
+          cd $KERNEL_PATH
           
           # SUSFS 补丁
           if ${{ github.event.inputs.SUSFS_ENABLED }}; then
@@ -164,7 +165,7 @@ jobs:
 
       - name: Configure kernel
         run: |
-          cd kernel_workspace/kernel_platform
+          cd $KERNEL_PATH
           
           # 基础 KSU 配置
           echo "CONFIG_KSU=y" >> common/arch/arm64/configs/gki_defconfig
@@ -214,9 +215,28 @@ jobs:
 
       - name: Set kernel name
         run: |
-          cd kernel_workspace/kernel_platform
-          sed -i '$s|echo "\$res"|echo "\${{ github.event.inputs.KERNEL_NAME }}"|' common/scripts/setlocalversion
-          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl
+          cd $KERNEL_PATH
+          
+          # 修改 setlocalversion
+          if [ -f "common/scripts/setlocalversion" ]; then
+            sed -i '$s|echo "\$res"|echo "\${{ github.event.inputs.KERNEL_NAME }}"|' common/scripts/setlocalversion
+          else
+            echo "::warning::common/scripts/setlocalversion 文件不存在，跳过修改"
+          fi
+
+          # 修改 stamp.bzl（添加多路径检查）
+          STAMP_PATHS=(
+            "build/kernel/kleaf/impl/stamp.bzl"
+            "build/kernel/kleaf/stamp.bzl"
+            "kleaf/impl/stamp.bzl"
+          )
+          for path in "${STAMP_PATHS[@]}"; do
+            if [ -f "$path" ]; then
+              sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" "$path"
+              echo "已修改 $path"
+              break
+            fi
+          done || echo "::warning::未找到任何 stamp.bzl 文件，跳过修改"
 
       - name: Build kernel
         run: |
@@ -267,10 +287,9 @@ jobs:
             echo "::error::未找到 Image 文件"
             exit 1
           }
-          
           find_image
           
-          # 复制 boot.img (如果存在)
+          # 复制 boot.img (非5.10内核)
           if [[ "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" ]]; then
             if [[ "${{ github.event.inputs.CPU }}" == "sm8650" || "${{ github.event.inputs.CPU }}" == "sm8750" ]]; then
               [ -f "kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/boot.img" ] && \
