@@ -61,8 +61,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      KERNEL_PATH: kernel_workspace/kernel_platform
 
     steps:
       - name: Maximize build space
@@ -93,18 +91,28 @@ jobs:
 
       - name: Initialize repo and sync
         run: |
-          mkdir kernel_workspace && cd kernel_workspace
+          mkdir -p kernel_workspace && cd kernel_workspace
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
           repo sync -j$(nproc --all)
-          rm $KERNEL_PATH/common/android/abi_gki_protected_exports_* || true
-          rm $KERNEL_PATH/msm-kernel/android/abi_gki_protected_exports_* || true
-          sed -i 's/ -dirty//g' $KERNEL_PATH/common/scripts/setlocalversion
-          sed -i 's/ -dirty//g' $KERNEL_PATH/msm-kernel/scripts/setlocalversion
+          
+          # 修复路径问题，先检查文件是否存在再操作
+          if [ -d "kernel_platform/common/android" ]; then
+            rm -f kernel_platform/common/android/abi_gki_protected_exports_* 2>/dev/null || true
+          fi
+          if [ -d "kernel_platform/msm-kernel/android" ]; then
+            rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* 2>/dev/null || true
+          fi
+          if [ -f "kernel_platform/common/scripts/setlocalversion" ]; then
+            sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
+          fi
+          if [ -f "kernel_platform/msm-kernel/scripts/setlocalversion" ]; then
+            sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
+          fi
 
       - name: Setup KernelSU
         if: ${{ github.event.inputs.kernelsu_variant != 'without ksu' }}
         run: |
-          cd $KERNEL_PATH
+          cd kernel_workspace/kernel_platform
           if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" ]]; then
             curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.kernelsu_version == 'main' && '-s susfs-dev' || '' }}
             cd KernelSU
@@ -120,14 +128,15 @@ jobs:
       - name: Apply patches
         if: ${{ github.event.inputs.SUSFS_ENABLED || github.event.inputs.VFS_patch_ENABLED == 'enable' }}
         run: |
-          cd $KERNEL_PATH
+          cd kernel_workspace/kernel_platform
           
           # SUSFS 补丁
           if ${{ github.event.inputs.SUSFS_ENABLED }}; then
             git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }} ../susfs4ksu
-            cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch common/
-            cp ../susfs4ksu/kernel_patches/fs/* common/fs/
-            cp ../susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+            [ -f "../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch" ] && \
+              cp "../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch" common/
+            [ -d "../susfs4ksu/kernel_patches/fs" ] && cp -r ../susfs4ksu/kernel_patches/fs/* common/fs/
+            [ -d "../susfs4ksu/kernel_patches/include/linux" ] && cp -r ../susfs4ksu/kernel_patches/include/linux/* common/include/linux/
             
             if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" ]]; then
               git clone https://github.com/ShirkNeko/SukiSU_patch.git ../SukiSU_patch
@@ -136,26 +145,26 @@ jobs:
               [ -d "../SukiSU_patch/other/lz4k/crypto" ] && cp -r ../SukiSU_patch/other/lz4k/crypto/* common/crypto/
             fi
             
-            cd common && patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
+            cd common && [ -f "50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch" ] && \
+              patch -p1 < "50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch" || true
             cd ..
           fi
           
           # VFS 补丁
-          if [[ "${{ github.event.inputs.VFS_patch_ENABLED }}" == "enable" ]]; then
-            if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" ]]; then
+          if [[ "${{ github.event.inputs.VFS_patch_ENABLED }}" == "enable" && "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" ]]; then
+            [ -f "../SukiSU_patch/hooks/new_hooks.patch" ] && \
               cp ../SukiSU_patch/hooks/new_hooks.patch common/
-              cd common && patch -p1 -F 3 < new_hooks.patch && cd ..
-              
-              if [[ "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" && -f "../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch" ]]; then
-                cp "../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch" common/
-                cd common && patch -p1 -F 3 < lz4kd.patch || true && cd ..
-              fi
+            cd common && [ -f "new_hooks.patch" ] && patch -p1 -F 3 < new_hooks.patch && cd ..
+            
+            if [[ "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" && -f "../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch" ]]; then
+              cp "../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch" common/
+              cd common && patch -p1 -F 3 < lz4kd.patch || true && cd ..
             fi
           fi
 
       - name: Configure kernel
         run: |
-          cd $KERNEL_PATH
+          cd kernel_workspace/kernel_platform
           
           # 基础 KSU 配置
           echo "CONFIG_KSU=y" >> common/arch/arm64/configs/gki_defconfig
@@ -205,7 +214,7 @@ jobs:
 
       - name: Set kernel name
         run: |
-          cd $KERNEL_PATH
+          cd kernel_workspace/kernel_platform
           sed -i '$s|echo "\$res"|echo "\${{ github.event.inputs.KERNEL_NAME }}"|' common/scripts/setlocalversion
           sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl
 
@@ -221,10 +230,10 @@ jobs:
           fi
           
           # 更新模块列表
-          if [ -f "$KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/modules.order" ]; then
-            cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/modules.order $KERNEL_PATH/common/android/gki_aarch64_modules
-            git -C $KERNEL_PATH/common add android/gki_aarch64_modules
-            git -C $KERNEL_PATH/common commit -m "Update gki_aarch64_modules" || true
+          if [ -f "kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/modules.order" ]; then
+            cp kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/modules.order kernel_platform/common/android/gki_aarch64_modules
+            git -C kernel_platform/common add android/gki_aarch64_modules
+            git -C kernel_platform/common commit -m "Update gki_aarch64_modules" || true
           fi
           
           # 正式构建
@@ -239,36 +248,42 @@ jobs:
           git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
           
-          # 5.10 内核特殊处理
-          if [[ "${{ github.event.inputs.KERNEL_VERSION }}" == "5.10" ]]; then
+          # 查找并复制 Image 文件
+          find_image() {
+            local paths=(
+              "kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image"
+              "kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/Image"
+              "kernel_platform/common/out/arch/arm64/boot/Image"
+              "out/dist/Image"
+            )
+            
+            for path in "${paths[@]}"; do
+              if [ -f "$path" ]; then
+                cp "$path" ./AnyKernel3/
+                cp "$path" ./kernel_workspace/kernel
+                return 0
+              fi
+            done
+            echo "::error::未找到 Image 文件"
+            exit 1
+          }
+          
+          find_image
+          
+          # 复制 boot.img (如果存在)
+          if [[ "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" ]]; then
             if [[ "${{ github.event.inputs.CPU }}" == "sm8650" || "${{ github.event.inputs.CPU }}" == "sm8750" ]]; then
-              [ -f "$KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image" ] && \
-                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./AnyKernel3/ && \
-                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./kernel_workspace/kernel
+              [ -f "kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/boot.img" ] && \
+                cp kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/boot.img ./kernel_workspace/
             else
-              [ -f "$KERNEL_PATH/out/dist/Image" ] && \
-                cp $KERNEL_PATH/out/dist/Image ./AnyKernel3/ && \
-                cp $KERNEL_PATH/out/dist/Image ./kernel_workspace/kernel
-            fi
-          else
-            # 其他内核版本处理
-            if [[ "${{ github.event.inputs.CPU }}" == "sm8650" || "${{ github.event.inputs.CPU }}" == "sm8750" ]]; then
-              [ -f "$KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image" ] && \
-                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./AnyKernel3/ && \
-                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/boot.img ./kernel_workspace/ && \
-                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./kernel_workspace/kernel
-            else
-              [ -f "$KERNEL_PATH/out/dist/Image" ] && \
-                cp $KERNEL_PATH/out/dist/Image ./AnyKernel3/ && \
-                cp $KERNEL_PATH/out/dist/boot.img ./kernel_workspace/ && \
-                cp $KERNEL_PATH/out/dist/Image ./kernel_workspace/kernel
+              [ -f "out/dist/boot.img" ] && cp out/dist/boot.img ./kernel_workspace/
             fi
           fi
           
           # 准备 zram.ko (非5.10内核)
           if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" && "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" ]]; then
             mkdir -p ./zram_module
-            find $KERNEL_PATH -name "zram.ko" -exec cp {} ./zram_module/ \;
+            find kernel_platform -name "zram.ko" -exec cp {} ./zram_module/ \; || true
           fi
 
       - name: Upload artifacts
