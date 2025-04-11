@@ -1,54 +1,77 @@
-name: Build OKI with MKSU
+name: Build OnePlus Kernel with KSU
 on:
   workflow_dispatch:
     inputs:
       CPU:
-        description: "分支 (sm8650, sm8550, etc)"
+        description: "芯片平台分支 (sm8475, sm8550等)"
         required: true
-        default: 'sm8650'
+        default: 'sm8475'
       FEIL:
-        description: "配置文件 (oneplus_pad2_v, etc)"
+        description: "配置文件 (oneplus_ace2_v等)"
         required: true
-        default: 'oneplus_pad2_v'
+        default: 'oneplus_ace2_v'
       CPUD:
-        description: "处理器代号 (pineapple, kalama, etc)"
+        description: "处理器代号 (waipio, kalama等)"
         required: true
-        default: 'pineapple'
-      KERNEL_CONFIG:
-        description: "内核配置 (格式: android版本-内核版本)"
+        default: 'waipio'
+      ANDROID_VERSION:
+        description: "安卓版本"
         required: true
-        default: 'android14-6.1'
-      CUSTOM_NAME:
-        description: "自定义内核名称 (输入'disable'禁用)"
+        default: 'android12'
+      KERNEL_VERSION:
+        description: "内核版本"
         required: true
-        default: '-android14-11-o-g1132d864665d'
-      KSU_CONFIG:
-        description: "KSU配置 (格式: 类型,版本,vfs补丁,susfs补丁)"
+        default: '5.10'
+      KERNEL_NAME:
+        description: "自定义内核名称"
         required: true
-        default: 'SukiSU-Ultra,susfs-dev,enable,true'
+        default: '-OKI'
+      custom_kernel_name:
+        description: "是否使用自定义内核名称"
+        required: true
+        type: choice
+        options:
+          - enable
+          - disable
+        default: 'enable'
+      kernelsu_variant:
+        description: "KernelSU 变体"
+        required: true
+        type: choice
+        options:
+          - Kernel
+          - SukiSU Ultra
+        default: 'SukiSU Ultra'
+      kernelsu_version:
+        description: "KernelSU 版本"
+        required: true
+        type: choice
+        options:
+          - without ksu
+          - tag
+          - main
+        default: 'main'
+      SUSFS_ENABLED:
+        description: "启用 SUSFS"
+        required: true
+        type: boolean
+        default: true
+      VFS_patch_ENABLED:
+        description: "启用 VFS 补丁"
+        required: true
+        type: choice
+        options:
+          - enable
+          - disable
+        default: 'enable'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    name: Build ${{ inputs.FEIL }}
-    steps:
-      - name: Parse inputs
-        run: |
-          IFS=',' read -r ksu_variant ksu_version vfs_patch susfs_enabled <<< "${{ github.event.inputs.KSU_CONFIG }}"
-          IFS='-' read -r android_version kernel_version <<< "${{ github.event.inputs.KERNEL_CONFIG }}"
-          
-          echo "KSU_VARIANT=$ksu_variant" >> $GITHUB_ENV
-          echo "KSU_VERSION=$ksu_version" >> $GITHUB_ENV
-          echo "VFS_PATCH=$vfs_patch" >> $GITHUB_ENV
-          echo "SUSFS_ENABLED=$susfs_enabled" >> $GITHUB_ENV
-          echo "ANDROID_VERSION=$android_version" >> $GITHUB_ENV
-          echo "KERNEL_VERSION=$kernel_version" >> $GITHUB_ENV
-          
-          if [[ "${{ github.event.inputs.CUSTOM_NAME }}" != "disable" ]]; then
-            echo "CUSTOM_KERNEL_NAME=true" >> $GITHUB_ENV
-            echo "KERNEL_NAME=${{ github.event.inputs.CUSTOM_NAME }}" >> $GITHUB_ENV
-          fi
+    env:
+      KERNEL_PATH: kernel_workspace/kernel_platform
 
+    steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
         with:
@@ -67,7 +90,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl
+          sudo apt install -y python3 git curl bc build-essential zip libncurses-dev flex bison
 
       - name: Install repo tool
         run: |
@@ -79,189 +102,192 @@ jobs:
         run: |
           mkdir kernel_workspace && cd kernel_workspace
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
-          repo sync
-          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
-          sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
-      
-      - name: Add KernelSU
-        if: ${{ env.KSU_VARIANT != 'SukiSU-Ultra' }}
-        run: |
-          cd kernel_workspace/kernel_platform
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.KSU_VERSION }}
-          cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" 12506)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+          repo sync -j$(nproc --all)
+          rm $KERNEL_PATH/common/android/abi_gki_protected_exports_* || true
+          rm $KERNEL_PATH/msm-kernel/android/abi_gki_protected_exports_* || true
+          sed -i 's/ -dirty//g' $KERNEL_PATH/common/scripts/setlocalversion
+          sed -i 's/ -dirty//g' $KERNEL_PATH/msm-kernel/scripts/setlocalversion
 
-      - name: Add SukiSU Ultra
-        if: ${{ env.KSU_VARIANT == 'SukiSU-Ultra' }}
+      - name: Setup KernelSU
+        if: ${{ github.event.inputs.kernelsu_variant != 'without ksu' }}
         run: |
-          cd kernel_workspace/kernel_platform
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ env.KSU_VERSION }}
-          cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          export KSU_VERSION=$KSU_VERSION
-          sed -i "s/DKSU_VERSION=12500/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
-          
-      - name: Apply SUSFS Patches
-        if: ${{ env.SUSFS_ENABLED == 'true' }}
-        run: |
-          cd kernel_workspace
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
-          git clone https://github.com/TheWildJames/kernel_patches.git
-          cd kernel_platform
-
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-          
-          if [[ "${{ env.KSU_VARIANT }}" == "SukiSU-Ultra" ]]; then
-            git clone https://github.com/ShirkNeko/SukiSU_patch.git
-            cp -r ../SukiSU_patch/other/lz4k/include/linux/* ./common/include/linux
-            cp -r ../SukiSU_patch/other/lz4k/lib/* ./common/lib
-            cp -r ../SukiSU_patch/other/lz4k/crypto/* ./common/crypto
-          fi
-          
-          echo "正在给内核打susfs补丁"
-          cd ./common
-          patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-          echo "完成"
-          
-      - name: Apply Hide Stuff Patches
-        if: ${{ env.SUSFS_ENABLED == 'true' }}
-        run: |
-          cd kernel_workspace/kernel_platform/common
-          cp ../../kernel_patches/69_hide_stuff.patch ./
-          echo "正在打隐藏应用补丁"
-          patch -p1 -F 3 < 69_hide_stuff.patch
-         
-      - name: Apply New Hooks Patches
-        if: ${{ env.VFS_PATCH == 'enable' }}
-        run: |
-          cd kernel_workspace/kernel_platform/common
-          cp ../../kernel_patches/hooks/new_hooks.patch ./
-          echo "正在打vfs补丁"
-          patch -p1 -F 3 < new_hooks.patch
-          
-          if [[ "${{ env.KSU_VARIANT }}" == "SukiSU-Ultra" && "${{ env.KERNEL_VERSION }}" != "5.10" ]]; then
-            cp ../../SukiSU_patch/other/lz4k_patch/${{ env.KERNEL_VERSION }}/lz4kd.patch ./
-            patch -p1 -F 3 < lz4kd.patch || true
-          fi
-          echo "完成"
-
-      - name: Add Configuration Settings
-        run: |
-          cd kernel_workspace/kernel_platform
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-
-          if [[ "${{ env.VFS_PATCH }}" == 'enable' ]]; then
-            echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          cd $KERNEL_PATH
+          if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" ]]; then
+            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.kernelsu_version == 'main' && '-s susfs-dev' || '' }}
+            cd KernelSU
+            KSU_VERSION=$(expr $(git rev-list --count main) + 10606)
           else
-            echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> ./common/arch/arm64/configs/gki_defconfig
+            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.kernelsu_version == 'main' && '-s main' || '' }}
+            cd KernelSU
+            KSU_VERSION=$(expr $(git rev-list --count HEAD) + 12500)
+          fi
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          sed -i "s/DKSU_VERSION=.*/DKSU_VERSION=$KSU_VERSION/" kernel/Makefile
+
+      - name: Apply patches
+        if: ${{ github.event.inputs.SUSFS_ENABLED || github.event.inputs.VFS_patch_ENABLED == 'enable' }}
+        run: |
+          cd $KERNEL_PATH
+          
+          # SUSFS 补丁
+          if ${{ github.event.inputs.SUSFS_ENABLED }}; then
+            git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }} ../susfs4ksu
+            cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch common/
+            cp ../susfs4ksu/kernel_patches/fs/* common/fs/
+            cp ../susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+            
+            if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" ]]; then
+              git clone https://github.com/ShirkNeko/SukiSU_patch.git ../SukiSU_patch
+              [ -d "../SukiSU_patch/other/lz4k/include/linux" ] && cp -r ../SukiSU_patch/other/lz4k/include/linux/* common/include/linux/
+              [ -d "../SukiSU_patch/other/lz4k/lib" ] && cp -r ../SukiSU_patch/other/lz4k/lib/* common/lib/
+              [ -d "../SukiSU_patch/other/lz4k/crypto" ] && cp -r ../SukiSU_patch/other/lz4k/crypto/* common/crypto/
+            fi
+            
+            cd common && patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
+            cd ..
           fi
           
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-
-          if [[ "${{ env.KSU_VARIANT }}" == "SukiSU-Ultra" ]]; then
-            if [ "${{ env.KERNEL_VERSION }}" != "6.6" ] && [ "${{ env.KERNEL_VERSION }}" != "5.10" ]; then
-              sed -i 's/CONFIG_ZRAM=m/CONFIG_ZRAM=y/g' ./common/arch/arm64/configs/gki_defconfig
-              sed -i 's/CONFIG_ZSMALLOC=m/CONFIG_ZSMALLOC=y/g' ./common/arch/arm64/configs/gki_defconfig
-              sed -i 's/CONFIG_MODULE_SIG=y/CONFIG_MODULE_SIG=n/g' ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_ZRAM_WRITEBACK=y" >> ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_CRYPTO_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_CRYPTO_842=y" >> ./common/arch/arm64/configs/gki_defconfig
-            fi
-
-            if [ "${{ env.KERNEL_VERSION }}" = "6.6" ]; then
-              echo "CONFIG_ZSMALLOC=y" >> ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_ZRAM_WRITEBACK=y" >> ./common/arch/arm64/configs/gki_defconfig
-              sed -i 's/CONFIG_ZRAM=m/CONFIG_ZRAM=y/g' ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_CRYPTO_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-              echo "CONFIG_CRYPTO_842=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # VFS 补丁
+          if [[ "${{ github.event.inputs.VFS_patch_ENABLED }}" == "enable" ]]; then
+            if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" ]]; then
+              cp ../SukiSU_patch/hooks/new_hooks.patch common/
+              cd common && patch -p1 -F 3 < new_hooks.patch && cd ..
+              
+              if [[ "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" && -f "../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch" ]]; then
+                cp "../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch" common/
+                cd common && patch -p1 -F 3 < lz4kd.patch || true && cd ..
+              fi
             fi
           fi
 
-          sed -i 's/check_defconfig//' ./common/build.config.gki
-
-      - name: Add make name
+      - name: Configure kernel
         run: |
-          cd kernel_workspace/kernel_platform
-          if [[ "${{ env.CUSTOM_KERNEL_NAME }}" == "true" ]]; then
-            sed -i '$s|echo "\$res"|echo "${{ env.KERNEL_NAME }}"|' ./common/scripts/setlocalversion
-          else
-            sed -i "\$s/\$res/\${res%-dirty}/" ./common/scripts/setlocalversion
+          cd $KERNEL_PATH
+          
+          # 基础 KSU 配置
+          echo "CONFIG_KSU=y" >> common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KPM=y" >> common/arch/arm64/configs/gki_defconfig
+          
+          # SUSFS 配置
+          if ${{ github.event.inputs.SUSFS_ENABLED }}; then
+            echo "CONFIG_KSU_SUSFS=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> common/arch/arm64/configs/gki_defconfig
+            
+            if [[ "${{ github.event.inputs.VFS_patch_ENABLED }}" == "enable" ]]; then
+              echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> common/arch/arm64/configs/gki_defconfig
+              echo "CONFIG_KSU_MANUAL_HOOK=y" >> common/arch/arm64/configs/gki_defconfig
+            else
+              echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> common/arch/arm64/configs/gki_defconfig
+            fi
           fi
-  
+          
+          # ZRAM 和压缩算法配置
+          if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" && "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" ]]; then
+            sed -i 's/CONFIG_ZRAM=m/CONFIG_ZRAM=y/g' common/arch/arm64/configs/gki_defconfig
+            sed -i 's/CONFIG_ZSMALLOC=m/CONFIG_ZSMALLOC=y/g' common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_ZRAM_WRITEBACK=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_LZ4K=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_LZ4KD=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_LZ4HC=y" >> common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_842=y" >> common/arch/arm64/configs/gki_defconfig
+          fi
+          
+          # 5.10 内核特殊配置
+          if [[ "${{ github.event.inputs.KERNEL_VERSION }}" == "5.10" ]]; then
+            echo "CONFIG_MODULE_SIG=n" >> common/arch/arm64/configs/gki_defconfig
+          fi
+          
+          sed -i 's/check_defconfig//' common/build.config.gki
+
+      - name: Set kernel name
+        run: |
+          cd $KERNEL_PATH
+          if [[ "${{ github.event.inputs.custom_kernel_name }}" == "enable" ]]; then
+            sed -i '$s|echo "\$res"|echo "\${{ github.event.inputs.KERNEL_NAME }}"|' common/scripts/setlocalversion
+          else
+            sed -i '$s|echo "\$res"|echo "\${res%-dirty}"|' common/scripts/setlocalversion
+          fi
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl
+
       - name: Build kernel
-        if: github.event.inputs.CPU == 'sm8650' 
         run: |
           cd kernel_workspace
-          ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} gki --action_env=KSU_VERSION
-         
-      - name: Fallback build kernel
-        if: github.event.inputs.CPU != 'sm8650' 
-        run: |
-          cd kernel_workspace
-          LTO=thin ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki
-     
-      - name: Make AnyKernel3
+          
+          # 第一次构建（生成模块列表）
+          if [[ "${{ github.event.inputs.CPU }}" == "sm8650" || "${{ github.event.inputs.CPU }}" == "sm8750" ]]; then
+            ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} gki --action_env=KSU_VERSION || true
+          else
+            LTO=thin ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki || true
+          fi
+          
+          # 更新模块列表
+          if [ -f "$KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/modules.order" ]; then
+            cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/modules.order $KERNEL_PATH/common/android/gki_aarch64_modules
+            git -C $KERNEL_PATH/common add android/gki_aarch64_modules
+            git -C $KERNEL_PATH/common commit -m "Update gki_aarch64_modules" || true
+          fi
+          
+          # 正式构建
+          if [[ "${{ github.event.inputs.CPU }}" == "sm8650" || "${{ github.event.inputs.CPU }}" == "sm8750" ]]; then
+            ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} gki --action_env=KSU_VERSION
+          else
+            LTO=thin ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki
+          fi
+
+      - name: Prepare artifacts
         run: |
           git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
-          if [[ "${{ inputs.CPU }}" == "sm8650" ]]; then
-            cp kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./AnyKernel3/
-            cp kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/boot.img ./kernel_workspace/
-            cp kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./kernel_workspace/kernel
-          else
-            cp kernel_workspace/out/dist/Image ./AnyKernel3/
-            cp kernel_workspace/out/dist/boot.img ./kernel_workspace/
-            cp kernel_workspace/out/dist/Image ./kernel_workspace/kernel
-          fi
-         
-      - name: Upload AnyKernel3
-        uses: actions/upload-artifact@v4
-        with:
-          name: AnyKernel3_KernelSU_${{ env.KSUVER }}_${{ github.event.inputs.FEIL }}
-          path: ./AnyKernel3/*
-
-      - name: Upload Boot
-        uses: actions/upload-artifact@v4
-        with:
-          name: Boot_KernelSU_${{ env.KSUVER }}_${{ github.event.inputs.FEIL }}
-          path: kernel_workspace/boot.img
-
-      - name: Upload Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image_KernelSU_${{ env.KSUVER }}_${{ github.event.inputs.FEIL }}
-          path: kernel_workspace/kernel
           
-      - name: Upload zram.ko
-        if: ${{ env.KSU_VARIANT == 'SukiSU-Ultra' }}
+          # 5.10 内核特殊处理
+          if [[ "${{ github.event.inputs.KERNEL_VERSION }}" == "5.10" ]]; then
+            if [[ "${{ github.event.inputs.CPU }}" == "sm8650" || "${{ github.event.inputs.CPU }}" == "sm8750" ]]; then
+              [ -f "$KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image" ] && \
+                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./AnyKernel3/ && \
+                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./kernel_workspace/kernel
+            else
+              [ -f "$KERNEL_PATH/out/dist/Image" ] && \
+                cp $KERNEL_PATH/out/dist/Image ./AnyKernel3/ && \
+                cp $KERNEL_PATH/out/dist/Image ./kernel_workspace/kernel
+            fi
+          else
+            # 其他内核版本处理
+            if [[ "${{ github.event.inputs.CPU }}" == "sm8650" || "${{ github.event.inputs.CPU }}" == "sm8750" ]]; then
+              [ -f "$KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image" ] && \
+                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./AnyKernel3/ && \
+                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/boot.img ./kernel_workspace/ && \
+                cp $KERNEL_PATH/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./kernel_workspace/kernel
+            else
+              [ -f "$KERNEL_PATH/out/dist/Image" ] && \
+                cp $KERNEL_PATH/out/dist/Image ./AnyKernel3/ && \
+                cp $KERNEL_PATH/out/dist/boot.img ./kernel_workspace/ && \
+                cp $KERNEL_PATH/out/dist/Image ./kernel_workspace/kernel
+            fi
+          fi
+          
+          # 准备 zram.ko (非5.10内核)
+          if [[ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU Ultra" && "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" ]]; then
+            mkdir -p ./zram_module
+            find $KERNEL_PATH -name "zram.ko" -exec cp {} ./zram_module/ \;
+          fi
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zram.ko_KernelSU_${{ env.KSUVER }}_${{ github.event.inputs.FEIL }}
-          path: drivers/block/zram/zram.ko
+          name: Kernel_${{ github.event.inputs.FEIL }}_${{ env.KSUVER }}
+          path: |
+            ./AnyKernel3/*
+            ./kernel_workspace/kernel
+            ./kernel_workspace/boot.img
+            ./zram_module/*
